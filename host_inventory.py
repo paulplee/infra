@@ -72,13 +72,245 @@ def get_basic_identity():
     }
 
 def get_os():
-    return {
+    info = {
         "platform": platform.system(),
         "platform_release": platform.release(),
         "platform_version": platform.version(),
         "machine": platform.machine(),
         "python": platform.python_version(),
     }
+    
+    # Enrich with /etc/os-release on Linux
+    if info["platform"] == "Linux":
+        try:
+            os_release = Path("/etc/os-release").read_text()
+            env = {}
+            for line in os_release.splitlines():
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    env[k] = v.strip('"')
+            info["distro_id"] = env.get("ID")
+            info["distro_name"] = env.get("PRETTY_NAME") or env.get("NAME")
+            info["distro_version"] = env.get("VERSION_ID")
+        except Exception:
+            pass
+            
+    return info
+
+def get_system_packages():
+    """Get list of installed system packages (apt, rpm, brew, etc.)"""
+    sys = platform.system().lower()
+    pkgs = []
+    
+    if sys == "linux":
+        # Debian/Ubuntu
+        if which("dpkg-query"):
+            # Name, Version, Architecture, Description (short)
+            out = run("dpkg-query -W -f='${Package}|${Version}|${Architecture}|${Summary}\n'")
+            if out:
+                for line in out.splitlines():
+                    parts = line.split("|")
+                    if len(parts) >= 4:
+                        pkgs.append({
+                            "name": parts[0],
+                            "version": parts[1],
+                            "arch": parts[2],
+                            "summary": parts[3],
+                            "manager": "dpkg"
+                        })
+        # RHEL/CentOS/Fedora
+        elif which("rpm"):
+            out = run("rpm -qa --qf '%{NAME}|%{VERSION}-%{RELEASE}|%{ARCH}|%{SUMMARY}\n'")
+            if out:
+                for line in out.splitlines():
+                    parts = line.split("|")
+                    if len(parts) >= 4:
+                        pkgs.append({
+                            "name": parts[0],
+                            "version": parts[1],
+                            "arch": parts[2],
+                            "summary": parts[3],
+                            "manager": "rpm"
+                        })
+        # Arch Linux
+        elif which("pacman"):
+             out = run("pacman -Q")
+             if out:
+                 for line in out.splitlines():
+                     parts = line.split()
+                     if len(parts) >= 2:
+                         pkgs.append({"name": parts[0], "version": parts[1], "manager": "pacman"})
+
+        # Nix (on any Linux/macOS)
+        if which("nix-env"):
+            out = run("nix-env -q")
+            if out:
+                for line in out.splitlines():
+                    if line.strip():
+                        pkgs.append({"name": line.strip(), "manager": "nix-env"})
+        
+        # Nix Profile (newer CLI)
+        if which("nix"):
+            out = run("nix profile list --json")
+            if out:
+                try:
+                    data = json.loads(out)
+                    # Structure varies, but usually has 'elements'
+                    elements = data.get("elements", [])
+                    for el in elements:
+                        # storePaths usually contains the name-version
+                        paths = el.get("storePaths", [])
+                        for p in paths:
+                            # /nix/store/hash-name-version
+                            name = Path(p).name
+                            # strip hash (32 chars + 1 dash)
+                            if len(name) > 33:
+                                name = name[33:]
+                            pkgs.append({"name": name, "manager": "nix-profile"})
+                except: pass
+
+    elif sys == "darwin":
+        if which("brew"):
+            out = run("brew list --versions")
+            if out:
+                for line in out.splitlines():
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        pkgs.append({
+                            "name": parts[0],
+                            "version": parts[1],
+                            "manager": "brew"
+                        })
+
+    elif sys == "windows":
+        # PowerShell Get-Package is slow and might not be available everywhere.
+        # WinGet is better if available.
+        if which("winget"):
+            # winget list is interactive/slow, maybe skip for now or use basic powershell
+            pass
+        
+        # Fallback to simple registry check via PowerShell
+        out = run(["powershell", "-NoProfile", "-Command", 
+                   "Get-ItemProperty HKLM:\\Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\* | Select-Object DisplayName, DisplayVersion | ConvertTo-Json"])
+        if out:
+            try:
+                items = parse_json_lenient(out)
+                if isinstance(items, list):
+                    for item in items:
+                        if item.get("DisplayName"):
+                            pkgs.append({
+                                "name": item.get("DisplayName"),
+                                "version": item.get("DisplayVersion"),
+                                "manager": "registry"
+                            })
+            except: pass
+
+    return pkgs or None
+
+def get_system_services():
+    """Get running system services"""
+    sys = platform.system().lower()
+    services = []
+
+    if sys == "linux":
+        if which("systemctl"):
+            out = run("systemctl list-units --type=service --state=running --no-pager --no-legend")
+            if out:
+                for line in out.splitlines():
+                    parts = line.split(None, 4)
+                    if len(parts) >= 4:
+                        services.append({
+                            "name": parts[0],
+                            "status": parts[2], # active
+                            "state": parts[3], # running
+                            "description": parts[4] if len(parts) > 4 else ""
+                        })
+    
+    elif sys == "darwin":
+        # launchctl list is cryptic, maybe just list loaded ones
+        out = run("launchctl list")
+        if out:
+            for line in out.splitlines()[1:]: # skip header
+                parts = line.split("\t")
+                if len(parts) >= 3:
+                    services.append({
+                        "pid": parts[0],
+                        "status": parts[1],
+                        "name": parts[2]
+                    })
+
+    elif sys == "windows":
+        out = run(["powershell", "-NoProfile", "-Command", 
+                   "Get-Service | Where-Object {$_.Status -eq 'Running'} | Select-Object Name,DisplayName,Status | ConvertTo-Json"])
+        if out:
+            try:
+                items = parse_json_lenient(out)
+                if isinstance(items, list):
+                    for item in items:
+                        services.append({
+                            "name": item.get("Name"),
+                            "display_name": item.get("DisplayName"),
+                            "status": "running"
+                        })
+            except: pass
+
+    return services or None
+
+def get_usb_devices():
+    sys = platform.system().lower()
+    devices = []
+
+    if sys == "linux":
+        if which("lsusb"):
+            out = run("lsusb")
+            # Bus 002 Device 001: ID 1d6b:0003 Linux Foundation 3.0 root hub
+            for line in out.splitlines():
+                m = re.search(r"ID\s+([0-9a-fA-F:]+)\s+(.*)", line)
+                if m:
+                    devices.append({
+                        "id": m.group(1),
+                        "name": m.group(2),
+                        "raw": line
+                    })
+    
+    elif sys == "darwin":
+        out = run("system_profiler SPUSBDataType -json 2>/dev/null")
+        if out:
+            try:
+                data = json.loads(out)
+                # Recursive parsing might be needed, but let's try flat first level
+                def parse_usb_items(items):
+                    res = []
+                    for item in items:
+                        res.append({
+                            "name": item.get("_name"),
+                            "vendor": item.get("vendor_id"),
+                            "product": item.get("product_id"),
+                            "serial": item.get("serial_num")
+                        })
+                        if "_items" in item:
+                            res.extend(parse_usb_items(item["_items"]))
+                    return res
+                
+                devices = parse_usb_items(data.get("SPUSBDataType", []))
+            except: pass
+
+    elif sys == "windows":
+        out = run(["powershell", "-NoProfile", "-Command",
+                   "Get-PnpDevice -Class USB | Select-Object FriendlyName,Status,Manufacturer | ConvertTo-Json"])
+        if out:
+            try:
+                items = parse_json_lenient(out)
+                if isinstance(items, list):
+                    for item in items:
+                        devices.append({
+                            "name": item.get("FriendlyName"),
+                            "vendor": item.get("Manufacturer"),
+                            "status": item.get("Status")
+                        })
+            except: pass
+
+    return devices or None
 
 def get_uptime_seconds(psutil):
     if not psutil:
@@ -201,6 +433,44 @@ def get_network(psutil):
                 interfaces[ifname] = entry
         except Exception:
             interfaces = {}
+
+    # Fallback for Linux if psutil is missing or failed
+    if not interfaces and sys == "linux":
+        try:
+            for p in Path("/sys/class/net").iterdir():
+                ifname = p.name
+                entry = {"mac": None, "ipv4": [], "ipv6": [], "is_up": None, "speed_mbps": None}
+                
+                # Read MAC
+                try:
+                    entry["mac"] = (p / "address").read_text().strip()
+                except: pass
+                
+                # Read Operstate
+                try:
+                    st = (p / "operstate").read_text().strip()
+                    entry["is_up"] = (st == "up")
+                except: pass
+                
+                # Read Speed
+                try:
+                    sp = (p / "speed").read_text().strip()
+                    entry["speed_mbps"] = int(sp) if sp.isdigit() else None
+                except: pass
+                
+                # Read IPs via 'ip addr'
+                ip_out = run(f"ip addr show {ifname}")
+                if ip_out:
+                    # inet 192.168.50.151/24 brd ...
+                    for m in re.finditer(r"inet\s+([0-9.]+)/([0-9]+)", ip_out):
+                        entry["ipv4"].append({"ip": m.group(1), "netmask": m.group(2)}) # netmask as CIDR
+                    # inet6 fe80::.../64 scope link
+                    for m in re.finditer(r"inet6\s+([0-9a-fA-F:]+)/([0-9]+)", ip_out):
+                        entry["ipv6"].append({"ip": m.group(1), "netmask": m.group(2)})
+
+                interfaces[ifname] = entry
+        except Exception:
+            pass
 
     # Default route + DNS (best-effort)
     default_gateway = None
@@ -401,6 +671,18 @@ def get_motherboard():
         if not info["name"]:
             info["name"] = read_dmi("product_name")
 
+        # Raspberry Pi detection (Device Tree)
+        if not info["name"]:
+            try:
+                # /sys/firmware/devicetree/base/model contains null-terminated string
+                model_path = Path("/sys/firmware/devicetree/base/model")
+                if model_path.exists():
+                    model = model_path.read_text().strip('\x00')
+                    if model:
+                        info["vendor"] = "Raspberry Pi Foundation"
+                        info["name"] = model
+            except: pass
+
     elif sys == "darwin":
         # macOS doesn't expose "motherboard" per se, but the system model is the closest equivalent
         # sysctl hw.model gives "MacBookPro16,1"
@@ -425,6 +707,110 @@ def get_motherboard():
                 pass
 
     return info
+
+def get_network_hardware():
+    sys = platform.system().lower()
+    devices = []
+
+    if sys == "linux":
+        if which("lspci"):
+            # -vmm: machine readable, verbose
+            # -k: show kernel drivers (might not work well with -vmm in all versions, but let's try separate or just basic info)
+            # We will stick to basic info from -vmm for reliability
+            out = run("lspci -vmm")
+            current_dev = {}
+            for line in out.splitlines():
+                if not line.strip():
+                    if current_dev:
+                        cls = current_dev.get("Class", "").lower()
+                        if "network" in cls or "ethernet" in cls:
+                            devices.append({
+                                "vendor": current_dev.get("Vendor"),
+                                "name": current_dev.get("Device"),
+                                "pci_slot": current_dev.get("Slot"),
+                                "type": current_dev.get("Class")
+                            })
+                    current_dev = {}
+                else:
+                    if ":" in line:
+                        key, val = line.split(":", 1)
+                        current_dev[key.strip()] = val.strip()
+            
+            # Catch last
+            if current_dev:
+                 cls = current_dev.get("Class", "").lower()
+                 if "network" in cls or "ethernet" in cls:
+                    devices.append({
+                        "vendor": current_dev.get("Vendor"),
+                        "name": current_dev.get("Device"),
+                        "pci_slot": current_dev.get("Slot"),
+                        "type": current_dev.get("Class")
+                    })
+        
+        # Try to enrich with link speed from sysfs
+        for dev in devices:
+            slot = dev.get("pci_slot") # e.g. 04:00.0
+            if slot:
+                # Try to find /sys/bus/pci/devices/*slot*/net/*
+                # We need to handle short slot vs long slot
+                # Globbing is easiest
+                try:
+                    # We look for any directory ending in the slot ID
+                    candidates = list(Path("/sys/bus/pci/devices").glob(f"*{slot}"))
+                    if candidates:
+                        pci_path = candidates[0]
+                        net_dir = pci_path / "net"
+                        if net_dir.exists():
+                            # There should be one folder here usually, e.g. enp4s0
+                            ifaces = list(net_dir.iterdir())
+                            if ifaces:
+                                iface_name = ifaces[0].name
+                                dev["interface_name"] = iface_name
+                                # Read speed
+                                try:
+                                    sp = (ifaces[0] / "speed").read_text().strip()
+                                    if sp.isdigit():
+                                        dev["current_link_speed_mbps"] = int(sp)
+                                except: pass
+                except: pass
+
+    elif sys == "darwin":
+        out = run("system_profiler SPNetworkDataType -json 2>/dev/null")
+        if out:
+            try:
+                data = json.loads(out)
+                items = data.get("SPNetworkDataType", [])
+                for item in items:
+                    # We want physical hardware info
+                    if item.get("interface"):
+                        devices.append({
+                            "name": item.get("type"),
+                            "hardware": item.get("hardware"),
+                            "interface": item.get("interface"),
+                            "vendor": "Apple" if "Airport" in item.get("type", "") else None
+                        })
+            except Exception:
+                pass
+
+    elif sys == "windows":
+        out = run(["powershell", "-NoProfile", "-Command", 
+                   "Get-NetAdapter | Select-Object Name,InterfaceDescription,DriverVersion,MacAddress,LinkSpeed | ConvertTo-Json"])
+        if out:
+            try:
+                items = parse_json_lenient(out)
+                if isinstance(items, dict): items = [items]
+                if isinstance(items, list):
+                    for item in items:
+                        devices.append({
+                            "name": item.get("Name"),
+                            "description": item.get("InterfaceDescription"),
+                            "driver_version": item.get("DriverVersion"),
+                            "speed": item.get("LinkSpeed")
+                        })
+            except Exception:
+                pass
+
+    return devices or None
 
 def get_virtualization_hints():
     hints = []
@@ -547,6 +933,9 @@ def main():
 
     psutil = try_import_psutil()
 
+    net_info = get_network(psutil)
+    net_info["hardware"] = get_network_hardware()
+
     data = {
         "schema": "pplx_infra_inventory_v2",
         "collected_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -558,7 +947,10 @@ def main():
         "gpu": get_gpu(),
         "motherboard": get_motherboard(),
         "storage": get_disks_and_mounts(psutil),
-        "network": get_network(psutil),
+        "network": net_info,
+        "usb_devices": get_usb_devices(),
+        "system_packages": get_system_packages(),
+        "system_services": get_system_services(),
         "capabilities": get_virtualization_hints(),
     }
 

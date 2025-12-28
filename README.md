@@ -10,10 +10,17 @@ The primary goal is to generate consistent, detailed JSON snapshots of **Host In
 
 **Purpose:** Generates a detailed "identity card" for a specific machine.
 
-* **System:** Hostname, OS version, Kernel, Uptime.
-* **Hardware:** CPU model/cores, RAM, Physical Disks, and Mount points.
-* **Network:** Interface IPs, MAC addresses, Default Gateway, DNS servers.
-* **Services:** Listening ports (sample) to identify active services.
+* **System:** Hostname, OS version (including Distro details for Ubuntu/Debian/Raspbian), Kernel, Uptime.
+* **Hardware:**
+  * **Core:** Motherboard model/vendor, CPU model/cores, RAM.
+  * **GPU:** Detailed probing for NVIDIA (Driver, VRAM), AMD, and Integrated graphics.
+  * **Storage:** Physical Disks (NVMe/SATA) and Mount points.
+  * **Network:** Physical NIC specs and negotiated Link Speed (e.g., 1Gbps, 10Gbps).
+  * **Peripherals:** Connected USB devices.
+* **Software:**
+  * **Packages:** Full list of installed system packages (supports `apt`, `rpm`, `pacman`, `brew`, and `nix`).
+  * **Services:** Active system services (systemd, launchd, Windows Services).
+* **Network Config:** Interface IPs, MAC addresses, Default Gateway, DNS servers.
 * **Docker:** (If detected) Lists all Compose projects, running containers, and renders `docker-compose` configurations for deep context.
 
 ### 2. `net_probe.py`
@@ -80,7 +87,11 @@ python3 net_probe.py
 *Replace the CIDR with your actual subnet (e.g., 192.168.1.0/24 or 10.10.1.0/24)*
 
 ```bash
+# Scan home LAN
 python3 net_probe.py --cidr 192.168.50.0/24 --ping-sweep
+
+# Scan office
+python3 net_probe.py --cidr 10.10.1.0/24 --nmap
 ```
 
 **Output:**
