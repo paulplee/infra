@@ -231,6 +231,201 @@ def get_network(psutil):
         "dns_servers": dns_servers,
     }
 
+def get_gpu():
+    sys = platform.system().lower()
+    gpus = []
+    software = {}
+
+    if sys == "linux":
+        # 1. Gather PCI devices (Base of Truth) via lspci
+        # We use a map keyed by PCI slot to merge info from other tools
+        pci_map = {} 
+        
+        if which("lspci"):
+            # -vmm: machine readable, verbose
+            out = run("lspci -vmm") 
+            # Output is blocks separated by newlines.
+            # Slot:	00:02.0
+            # Class:	VGA compatible controller
+            # Vendor:	Intel Corporation
+            # Device:	UHD Graphics 620
+            current_dev = {}
+            for line in out.splitlines():
+                if not line.strip():
+                    if current_dev:
+                        cls = current_dev.get("Class", "").lower()
+                        if "vga" in cls or "3d" in cls or "display" in cls:
+                            slot = current_dev.get("Slot")
+                            if slot:
+                                pci_map[slot] = {
+                                    "name": current_dev.get("Device"),
+                                    "vendor": current_dev.get("Vendor"),
+                                    "pci_slot": slot,
+                                    "type": "pci_device" # generic
+                                }
+                    current_dev = {}
+                else:
+                    if ":" in line:
+                        key, val = line.split(":", 1)
+                        current_dev[key.strip()] = val.strip()
+            
+            # Catch last block
+            if current_dev:
+                 cls = current_dev.get("Class", "").lower()
+                 if "vga" in cls or "3d" in cls or "display" in cls:
+                    slot = current_dev.get("Slot")
+                    if slot:
+                        pci_map[slot] = {
+                            "name": current_dev.get("Device"),
+                            "vendor": current_dev.get("Vendor"),
+                            "pci_slot": slot,
+                            "type": "pci_device"
+                        }
+
+        # 2. NVIDIA Enrichment
+        if which("nvidia-smi"):
+            try:
+                # pci.bus_id gives 0000:01:00.0
+                out = run("nvidia-smi --query-gpu=pci.bus_id,name,driver_version,memory.total --format=csv,noheader")
+                if out:
+                    for line in out.splitlines():
+                        parts = [x.strip() for x in line.split(",")]
+                        if len(parts) >= 4:
+                            bus_id_long = parts[0] # e.g. 00000000:01:00.0
+                            
+                            # Try to match with pci_map keys (usually 01:00.0)
+                            # We extract the last 3 parts: bus:device.function
+                            match_slot = None
+                            # Regex to find XX:YY.Z at the end
+                            m = re.search(r"([0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-9a-fA-F]+)$", bus_id_long)
+                            if m:
+                                match_slot = m.group(1)
+                            
+                            entry = {
+                                "name": parts[1],
+                                "driver_version": parts[2],
+                                "memory_total": parts[3],
+                                "type": "nvidia",
+                                "pci_slot": bus_id_long
+                            }
+                            
+                            if match_slot and match_slot in pci_map:
+                                pci_map[match_slot].update(entry)
+                            else:
+                                pci_map[bus_id_long] = entry
+            except Exception:
+                pass
+        
+        # 3. AMD ROCm Enrichment (Basic check)
+        if which("rocm-smi"):
+             # If rocm-smi works, we might assume AMD GPUs are present and driven by ROCm
+             # Parsing rocm-smi is complex, but we can mark them if we find them in lspci
+             # For now, just noting the software presence is often enough, 
+             # but we could try to match if needed.
+             pass
+
+        gpus = list(pci_map.values())
+
+        # 4. Software: CUDA, ROCm
+        if which("nvcc"):
+            out = run("nvcc --version")
+            if out:
+                m = re.search(r"release ([0-9.]+)", out)
+                if m:
+                    software["cuda_version"] = m.group(1)
+        
+        if which("rocminfo") or which("rocm-smi"):
+             software["rocm_detected"] = True
+
+    elif sys == "darwin":
+        out = run("system_profiler SPDisplaysDataType -json 2>/dev/null")
+        if out:
+            try:
+                data = json.loads(out)
+                items = data.get("SPDisplaysDataType", [])
+                for item in items:
+                    gpus.append({
+                        "name": item.get("sppci_model"),
+                        "vendor": item.get("spdisplays_vendor"),
+                        "memory": item.get("spdisplays_vram"),
+                        "metal": item.get("spdisplays_metal"),
+                    })
+            except Exception:
+                pass
+
+    elif sys == "windows":
+        out = run(["powershell", "-NoProfile", "-Command", 
+                   "Get-CimInstance Win32_VideoController | Select-Object Name,DriverVersion,AdapterRAM | ConvertTo-Json"])
+        if out:
+            try:
+                items = parse_json_lenient(out)
+                if isinstance(items, dict): items = [items]
+                if isinstance(items, list):
+                    for item in items:
+                        gpus.append({
+                            "name": item.get("Name"),
+                            "driver_version": item.get("DriverVersion"),
+                            "memory_bytes": item.get("AdapterRAM")
+                        })
+            except Exception:
+                pass
+        
+        if which("nvcc"):
+             out = run("nvcc --version")
+             if out:
+                m = re.search(r"release ([0-9.]+)", out)
+                if m:
+                    software["cuda_version"] = m.group(1)
+
+    return {"devices": gpus, "software": software} if (gpus or software) else None
+
+def get_motherboard():
+    sys = platform.system().lower()
+    info = {"vendor": None, "name": None, "version": None}
+
+    if sys == "linux":
+        # Try /sys/class/dmi/id/ first (often readable without root)
+        def read_dmi(fname):
+            try:
+                return Path(f"/sys/class/dmi/id/{fname}").read_text().strip()
+            except Exception:
+                return None
+        
+        info["vendor"] = read_dmi("board_vendor")
+        info["name"] = read_dmi("board_name")
+        info["version"] = read_dmi("board_version")
+
+        # Fallback to system info if board info is missing (common on some VMs or laptops)
+        if not info["vendor"]:
+            info["vendor"] = read_dmi("sys_vendor")
+        if not info["name"]:
+            info["name"] = read_dmi("product_name")
+
+    elif sys == "darwin":
+        # macOS doesn't expose "motherboard" per se, but the system model is the closest equivalent
+        # sysctl hw.model gives "MacBookPro16,1"
+        model_id = run("sysctl -n hw.model")
+        # system_profiler gives "MacBook Pro (16-inch, 2019)"
+        # We can put Apple as vendor
+        info["vendor"] = "Apple Inc."
+        info["name"] = model_id
+        
+    elif sys == "windows":
+        out = run(["powershell", "-NoProfile", "-Command", 
+                   "Get-CimInstance Win32_BaseBoard | Select-Object Manufacturer,Product,Version | ConvertTo-Json"])
+        if out:
+            try:
+                obj = parse_json_lenient(out)
+                if isinstance(obj, list): obj = obj[0]
+                if isinstance(obj, dict):
+                    info["vendor"] = obj.get("Manufacturer")
+                    info["name"] = obj.get("Product")
+                    info["version"] = obj.get("Version")
+            except Exception:
+                pass
+
+    return info
+
 def get_virtualization_hints():
     hints = []
     if which("docker"): hints.append("docker")
@@ -360,6 +555,8 @@ def main():
         "uptime_seconds": get_uptime_seconds(psutil),
         "cpu": get_cpu(psutil),
         "memory": get_memory(psutil),
+        "gpu": get_gpu(),
+        "motherboard": get_motherboard(),
         "storage": get_disks_and_mounts(psutil),
         "network": get_network(psutil),
         "capabilities": get_virtualization_hints(),
