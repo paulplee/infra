@@ -1,0 +1,36 @@
+# Ignore generated inventory and probe files
+output/
+inventory-*.json
+netprobe.json
+*.log
+
+# Ignore Python cache
+__pycache__/
+*.pyc
+
+# Ignore nixos related files
+# flake.lock # Committing lock file for reproducible Nix builds
+.venv*/
+
+# Direnv
+.direnv/
+
+# Nix build result
+result
+
+# Environment variables
+.env
+
+# OS generated files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Python distribution and testing
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
