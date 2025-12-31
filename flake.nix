@@ -1,7 +1,7 @@
 {
   description = "Sandbox devshell (Python)";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
 
   outputs = { self, nixpkgs }:
     let
@@ -14,6 +14,7 @@
           python311Packages.pip
           git
         ];
+	buildInputs = [ pkgs.bashInteractive ]; 
       };
     };
 }

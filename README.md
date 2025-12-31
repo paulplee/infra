@@ -21,7 +21,7 @@ The primary goal is to generate consistent, detailed JSON snapshots of **Host In
   * **Packages:** Full list of installed system packages (supports `apt`, `rpm`, `pacman`, `brew`, and `nix`).
   * **Services:** Active system services (systemd, launchd, Windows Services).
 * **Network Config:** Interface IPs, MAC addresses, Default Gateway, DNS servers.
-* **Docker:** (If detected) Lists all Compose projects, running containers, and renders `docker-compose` configurations for deep context.
+* **Docker:** (If detected) Lists all Compose projects, running containers, renders `docker-compose` configurations, and includes original `docker-compose.yml` files for deep context.
 
 ### 2. `net_probe.py`
 

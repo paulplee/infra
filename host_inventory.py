@@ -892,11 +892,30 @@ def get_docker_summary(max_projects=30, max_containers=200, include_inspect=True
         cfg_txt = run(base + ["-p", name, "config"])
         rendered_config = cfg_txt[:200000] if cfg_txt else None  # Cap size at 200KB
 
+        # Collect original docker-compose.yml files
+        compose_files_content = {}
+        config_files_str = pr.get("ConfigFiles") or pr.get("configFiles")
+        if config_files_str:
+            # ConfigFiles is usually comma-separated
+            paths = [p.strip() for p in config_files_str.split(",")]
+            for p in paths:
+                try:
+                    path_obj = Path(p)
+                    if path_obj.exists() and path_obj.is_file():
+                        # Limit size to avoid huge files
+                        content = path_obj.read_text(encoding="utf-8", errors="replace")
+                        if len(content) > 100000:
+                            content = content[:100000] + "\n... (truncated)"
+                        compose_files_content[p] = content
+                except Exception as e:
+                    compose_files_content[p] = f"Error reading file: {e}"
+
         entry = {
             "project": name,
             "ls_record": pr,
             "ps": ps,
             "rendered_config": rendered_config,
+            "compose_files": compose_files_content,
             "containers_inspect": None,
         }
 
