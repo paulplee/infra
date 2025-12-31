@@ -97,15 +97,34 @@ python3 net_probe.py --cidr 10.10.1.0/24 --nmap
 **Output:**
 Generates a file named `output/netprobe.json`.
 
+### 3. `unifi_inventory.py`
+
+**Purpose:** Extracts deep network configuration from a Ubiquiti UniFi Controller (UDM Pro, Cloud Key, etc.).
+
+* **Topology:** Lists all UniFi devices (Switches, APs) and connected clients.
+* **Configuration:** Dumps VLANs, Subnets, and WiFi settings.
+* **Security:** Exports all Firewall Rules and Groups.
+
+**Usage:**
+You need a local user on your UDM (Settings -> System -> Admins -> Add New Admin -> Local Access Only).
+
+```bash
+python3 unifi_inventory.py --url https://192.168.1.1 --user <username> --password <password>
+```
+
+**Output:**
+Generates a file named `output/unifi-inventory.json`.
+
 ***
 
 ## 🧠 Workflow: Getting AI Advice
 
-1. **Run** `host_inventory.py` on your key nodes (e.g., your NAS, your router/gateway, your main workstation).
-2. **Run** `net_probe.py` to map the layout.
-3. **Upload** the resulting `.json` files to your Perplexity Infrastructure Project.
-4. **Prompt:**
-    > "I have uploaded the inventory for my NAS (ae86) and my Network Probe data. Based on the current Docker containers running on ae86, how should I configure the network segmentation?"
+1. **Run** `host_inventory.py` on your key nodes.
+2. **Run** `unifi_inventory.py` to get the ground truth of your network config.
+3. **Run** `net_probe.py` to verify what is actually reachable.
+4. **Upload** the resulting `.json` files to your Perplexity Infrastructure Project.
+5. **Prompt:**
+    > "I have uploaded my UniFi config and host inventory. Are my firewall rules correctly isolating the IoT VLAN from my NAS?"
 
 ***
 
