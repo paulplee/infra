@@ -349,13 +349,32 @@ def get_cpu(psutil):
     return cpu
 
 def get_memory(psutil):
-    if not psutil:
-        return {"total_bytes": None}
-    try:
-        vm = psutil.virtual_memory()
-        return {"total_bytes": int(vm.total)}
-    except Exception:
-        return {"total_bytes": None}
+    total_bytes = None
+    
+    # Try psutil first
+    if psutil:
+        try:
+            vm = psutil.virtual_memory()
+            total_bytes = int(vm.total)
+        except Exception:
+            pass
+    
+    # Linux fallback: read from /proc/meminfo
+    if total_bytes is None and platform.system().lower() == "linux":
+        try:
+            meminfo = Path("/proc/meminfo").read_text()
+            for line in meminfo.splitlines():
+                if line.startswith("MemTotal:"):
+                    # Format: "MemTotal:       131892224 kB"
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        kb = int(parts[1])
+                        total_bytes = kb * 1024  # Convert kB to bytes
+                    break
+        except Exception:
+            pass
+    
+    return {"total_bytes": total_bytes}
 
 def get_disks_and_mounts(psutil):
     disks = []
