@@ -13,8 +13,8 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
         
-        # Define the interpreter explicitly
-        python = pkgs.python3;
+        # ▼ CHANGE THIS LINE to select your version (e.g. python310, python312)
+        python = pkgs.python311;
 
         # 1. Load requirements.txt
         project = pyproject-nix.lib.project.loadRequirementsTxt {
@@ -22,9 +22,8 @@
         };
 
         # 2. Build the Python Environment
-        # FIX: explicitly pass { inherit python; } (not python3)
-        # FIX: use withPackages, which accepts the function returned by the renderer
-        pythonEnv = pkgs.python3.withPackages (project.renderers.withPackages {
+        # We pass our specific 'python' version to the renderer and the withPackages function
+        pythonEnv = python.withPackages (project.renderers.withPackages {
           inherit python;
         });
       in
