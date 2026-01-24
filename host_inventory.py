@@ -10,6 +10,408 @@ import socket
 import subprocess
 from pathlib import Path
 
+# --- Sensitive Data Redaction ---
+
+# Patterns for keys/names that indicate sensitive values
+SENSITIVE_KEY_PATTERNS = [
+    # API keys and tokens
+    r"api[_-]?key",
+    r"apikey",
+    r"api[_-]?secret",
+    r"access[_-]?key",
+    r"access[_-]?token",
+    r"auth[_-]?token",
+    r"bearer[_-]?token",
+    r"token",
+    # Passwords and secrets
+    r"password",
+    r"passwd",
+    r"pwd",
+    r"secret",
+    r"credential",
+    # Specific service keys
+    r"openai[_-]?key",
+    r"openai[_-]?api",
+    r"anthropic[_-]?key",
+    r"anthropic[_-]?api",
+    r"azure[_-]?key",
+    r"aws[_-]?secret",
+    r"aws[_-]?access",
+    r"gcp[_-]?key",
+    r"google[_-]?api",
+    r"stripe[_-]?key",
+    r"stripe[_-]?secret",
+    r"github[_-]?token",
+    r"gitlab[_-]?token",
+    r"slack[_-]?token",
+    r"discord[_-]?token",
+    r"twilio[_-]?",
+    r"sendgrid[_-]?",
+    r"mailgun[_-]?",
+    # Database credentials
+    r"db[_-]?pass",
+    r"database[_-]?pass",
+    r"mysql[_-]?pass",
+    r"postgres[_-]?pass",
+    r"redis[_-]?pass",
+    r"mongo[_-]?pass",
+    r"connection[_-]?string",
+    # SSH and certificates
+    r"ssh[_-]?key",
+    r"private[_-]?key",
+    r"priv[_-]?key",
+    r"pem",
+    r"cert[_-]?key",
+    # Encryption
+    r"encrypt[_-]?key",
+    r"decrypt[_-]?key",
+    r"signing[_-]?key",
+    r"jwt[_-]?secret",
+    # Generic
+    r"auth",
+    r"_key$",
+    r"_secret$",
+    r"_token$",
+    r"_pass$",
+    r"_password$",
+]
+
+# Compile patterns for efficiency
+SENSITIVE_KEY_REGEX = re.compile(
+    "|".join(SENSITIVE_KEY_PATTERNS),
+    re.IGNORECASE
+)
+
+# Patterns for values that look like secrets (even without key context)
+SENSITIVE_VALUE_PATTERNS = [
+    # OpenAI API keys
+    r"sk-[a-zA-Z0-9]{20,}",
+    # Anthropic API keys
+    r"sk-ant-[a-zA-Z0-9\-]{20,}",
+    # AWS access key IDs
+    r"AKIA[0-9A-Z]{16}",
+    # AWS secret keys (40 chars, alphanumeric + special)
+    r"(?<![A-Za-z0-9/+=])[A-Za-z0-9/+=]{40}(?![A-Za-z0-9/+=])",
+    # GitHub tokens
+    r"ghp_[a-zA-Z0-9]{36}",
+    r"gho_[a-zA-Z0-9]{36}",
+    r"ghu_[a-zA-Z0-9]{36}",
+    r"ghs_[a-zA-Z0-9]{36}",
+    r"ghr_[a-zA-Z0-9]{36}",
+    # GitLab tokens
+    r"glpat-[a-zA-Z0-9\-]{20}",
+    # Slack tokens
+    r"xox[baprs]-[a-zA-Z0-9\-]+",
+    # Stripe keys
+    r"sk_live_[a-zA-Z0-9]{24,}",
+    r"sk_test_[a-zA-Z0-9]{24,}",
+    r"pk_live_[a-zA-Z0-9]{24,}",
+    r"pk_test_[a-zA-Z0-9]{24,}",
+    # Generic long base64-ish secrets (32+ chars)
+    r"(?<![A-Za-z0-9])[A-Za-z0-9+/]{32,}={0,2}(?![A-Za-z0-9])",
+    # Bearer tokens
+    r"Bearer\s+[a-zA-Z0-9\-_.]+",
+    # Basic auth in URLs
+    r"://[^:]+:[^@]+@",
+]
+
+SENSITIVE_VALUE_REGEX = re.compile(
+    "|".join(SENSITIVE_VALUE_PATTERNS)
+)
+
+REDACTED_PLACEHOLDER = "[REDACTED]"
+
+
+def is_sensitive_key(key):
+    """Check if a key name indicates a sensitive value."""
+    if not key:
+        return False
+    return bool(SENSITIVE_KEY_REGEX.search(str(key)))
+
+
+def redact_sensitive_value(value, key=None):
+    """
+    Redact a value if it appears to be sensitive.
+    If key is provided, check if the key indicates sensitivity.
+    Also checks the value itself for known secret patterns.
+    """
+    if value is None:
+        return value
+    
+    # If key indicates sensitivity, redact the whole value
+    if key and is_sensitive_key(key):
+        return REDACTED_PLACEHOLDER
+    
+    # Check if value itself looks like a secret
+    value_str = str(value)
+    if SENSITIVE_VALUE_REGEX.search(value_str):
+        return REDACTED_PLACEHOLDER
+    
+    return value
+
+
+def redact_dict(d, parent_key=None):
+    """Recursively redact sensitive values in a dictionary."""
+    if not isinstance(d, dict):
+        return d
+    
+    result = {}
+    for key, value in d.items():
+        if isinstance(value, dict):
+            result[key] = redact_dict(value, key)
+        elif isinstance(value, list):
+            result[key] = redact_list(value, key)
+        elif isinstance(value, str):
+            result[key] = redact_sensitive_value(value, key)
+        else:
+            result[key] = value
+    return result
+
+
+def redact_list(lst, parent_key=None):
+    """Recursively redact sensitive values in a list."""
+    if not isinstance(lst, list):
+        return lst
+    
+    result = []
+    for item in lst:
+        if isinstance(item, dict):
+            result.append(redact_dict(item, parent_key))
+        elif isinstance(item, list):
+            result.append(redact_list(item, parent_key))
+        elif isinstance(item, str):
+            # Handle environment variable format: KEY=VALUE
+            if "=" in item and parent_key and "env" in str(parent_key).lower():
+                parts = item.split("=", 1)
+                if len(parts) == 2:
+                    env_key, env_value = parts
+                    if is_sensitive_key(env_key):
+                        result.append(f"{env_key}={REDACTED_PLACEHOLDER}")
+                    elif SENSITIVE_VALUE_REGEX.search(env_value):
+                        result.append(f"{env_key}={REDACTED_PLACEHOLDER}")
+                    else:
+                        result.append(item)
+                else:
+                    result.append(item)
+            else:
+                result.append(redact_sensitive_value(item, parent_key))
+        else:
+            result.append(item)
+    return result
+
+
+def redact_yaml_content(yaml_text):
+    """Redact sensitive values in YAML/docker-compose content."""
+    if not yaml_text:
+        return yaml_text
+    
+    lines = yaml_text.split("\n")
+    result_lines = []
+    
+    for line in lines:
+        # Match key: value patterns
+        match = re.match(r'^(\s*)([^:]+):\s*(.*)$', line)
+        if match:
+            indent, key, value = match.groups()
+            key_stripped = key.strip().strip('-').strip()
+            value_stripped = value.strip()
+            
+            # Check if key indicates sensitivity
+            if is_sensitive_key(key_stripped) and value_stripped:
+                # Keep quotes if present
+                if value_stripped.startswith('"') and value_stripped.endswith('"'):
+                    result_lines.append(f'{indent}{key}: "{REDACTED_PLACEHOLDER}"')
+                elif value_stripped.startswith("'") and value_stripped.endswith("'"):
+                    result_lines.append(f"{indent}{key}: '{REDACTED_PLACEHOLDER}'")
+                else:
+                    result_lines.append(f'{indent}{key}: {REDACTED_PLACEHOLDER}')
+            # Check if value looks like a secret
+            elif SENSITIVE_VALUE_REGEX.search(value_stripped):
+                result_lines.append(f'{indent}{key}: {REDACTED_PLACEHOLDER}')
+            # Handle KEY=VALUE in environment sections
+            elif "=" in value_stripped:
+                env_match = re.match(r'^([A-Z_][A-Z0-9_]*)=(.*)$', value_stripped, re.IGNORECASE)
+                if env_match:
+                    env_key, env_value = env_match.groups()
+                    if is_sensitive_key(env_key) or SENSITIVE_VALUE_REGEX.search(env_value):
+                        result_lines.append(f'{indent}{key}: {env_key}={REDACTED_PLACEHOLDER}')
+                    else:
+                        result_lines.append(line)
+                else:
+                    result_lines.append(line)
+            else:
+                result_lines.append(line)
+        else:
+            # Check for standalone environment variables: - KEY=VALUE
+            env_line_match = re.match(r'^(\s*-\s*)([A-Z_][A-Z0-9_]*)=(.*)$', line, re.IGNORECASE)
+            if env_line_match:
+                indent, env_key, env_value = env_line_match.groups()
+                if is_sensitive_key(env_key) or SENSITIVE_VALUE_REGEX.search(env_value):
+                    result_lines.append(f'{indent}{env_key}={REDACTED_PLACEHOLDER}')
+                else:
+                    result_lines.append(line)
+            else:
+                result_lines.append(line)
+    
+    return "\n".join(result_lines)
+
+
+def redact_inventory_data(data):
+    """
+    Main function to redact sensitive information from the inventory data.
+    Applies appropriate redaction to different sections.
+    """
+    if not isinstance(data, dict):
+        return data
+    
+    result = {}
+    
+    for key, value in data.items():
+        if key == "docker":
+            # Special handling for Docker data
+            result[key] = redact_docker_data(value)
+        elif key in ("rendered_config", "compose_files"):
+            # YAML content needs special handling
+            if isinstance(value, dict):
+                result[key] = {k: redact_yaml_content(v) for k, v in value.items()}
+            elif isinstance(value, str):
+                result[key] = redact_yaml_content(value)
+            else:
+                result[key] = value
+        elif isinstance(value, dict):
+            result[key] = redact_inventory_data(value)
+        elif isinstance(value, list):
+            result[key] = redact_list(value, key)
+        else:
+            result[key] = value
+    
+    return result
+
+
+def redact_docker_data(docker_data):
+    """Redact sensitive information from Docker inventory data."""
+    if not docker_data:
+        return docker_data
+    
+    if not isinstance(docker_data, dict):
+        return docker_data
+    
+    result = {}
+    
+    for key, value in docker_data.items():
+        if key == "compose_projects":
+            result[key] = [redact_compose_project(p) for p in (value or [])]
+        elif key == "standalone_containers_sample":
+            result[key] = redact_list(value, key) if value else None
+        else:
+            result[key] = value
+    
+    return result
+
+
+def redact_compose_project(project):
+    """Redact sensitive information from a single compose project."""
+    if not isinstance(project, dict):
+        return project
+    
+    result = {}
+    
+    for key, value in project.items():
+        if key == "rendered_config":
+            result[key] = redact_yaml_content(value) if value else None
+        elif key == "compose_files":
+            if isinstance(value, dict):
+                result[key] = {k: redact_yaml_content(v) for k, v in value.items()}
+            else:
+                result[key] = value
+        elif key == "containers_inspect":
+            result[key] = redact_containers_inspect(value)
+        elif key == "ps":
+            result[key] = redact_list(value, key) if value else None
+        else:
+            result[key] = value
+    
+    return result
+
+
+def redact_containers_inspect(inspect_data):
+    """Redact sensitive information from docker inspect output."""
+    if not inspect_data:
+        return inspect_data
+    
+    if isinstance(inspect_data, list):
+        return [redact_container_inspect(c) for c in inspect_data]
+    elif isinstance(inspect_data, dict):
+        return redact_container_inspect(inspect_data)
+    
+    return inspect_data
+
+
+def redact_container_inspect(container):
+    """Redact a single container's inspect data."""
+    if not isinstance(container, dict):
+        return container
+    
+    result = {}
+    
+    for key, value in container.items():
+        if key == "Config":
+            result[key] = redact_container_config(value)
+        elif key == "Env" or (isinstance(value, list) and key.lower() == "env"):
+            result[key] = redact_env_list(value)
+        elif isinstance(value, dict):
+            result[key] = redact_dict(value, key)
+        elif isinstance(value, list):
+            result[key] = redact_list(value, key)
+        else:
+            result[key] = value
+    
+    return result
+
+
+def redact_container_config(config):
+    """Redact container Config section from docker inspect."""
+    if not isinstance(config, dict):
+        return config
+    
+    result = {}
+    
+    for key, value in config.items():
+        if key == "Env":
+            result[key] = redact_env_list(value)
+        elif isinstance(value, dict):
+            result[key] = redact_dict(value, key)
+        elif isinstance(value, list):
+            result[key] = redact_list(value, key)
+        else:
+            result[key] = value
+    
+    return result
+
+
+def redact_env_list(env_list):
+    """Redact environment variables in a list of KEY=VALUE strings."""
+    if not env_list:
+        return env_list
+    
+    result = []
+    for item in env_list:
+        if isinstance(item, str) and "=" in item:
+            parts = item.split("=", 1)
+            if len(parts) == 2:
+                env_key, env_value = parts
+                if is_sensitive_key(env_key) or SENSITIVE_VALUE_REGEX.search(env_value):
+                    result.append(f"{env_key}={REDACTED_PLACEHOLDER}")
+                else:
+                    result.append(item)
+            else:
+                result.append(item)
+        else:
+            result.append(item)
+    
+    return result
+
+
 # --- Helper Functions ---
 
 def run(cmd, timeout=30):
@@ -967,6 +1369,7 @@ def main():
     ap.add_argument("--out", default=None, help="Output JSON path (default: ./inventory-<hostname>.json)")
     ap.add_argument("--no-ports", action="store_true", help="Skip listening ports enumeration")
     ap.add_argument("--no-docker", action="store_true", help="Skip Docker enumeration")
+    ap.add_argument("--no-redact", action="store_true", help="Disable redaction of sensitive information")
     args = ap.parse_args()
 
     psutil = try_import_psutil()
@@ -1002,6 +1405,11 @@ def main():
                 data["docker"] = get_docker_summary(include_inspect=True)
             except Exception as e:
                 data["docker_error"] = str(e)
+
+    # Apply redaction to remove sensitive information
+    if not args.no_redact:
+        data = redact_inventory_data(data)
+        data["_redaction_applied"] = True
 
     hostname = data["identity"]["hostname"] or "unknown-host"
     if args.out:
