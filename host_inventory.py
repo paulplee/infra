@@ -84,10 +84,11 @@ SENSITIVE_KEY_REGEX = re.compile(
 
 # Patterns for values that look like secrets (even without key context)
 SENSITIVE_VALUE_PATTERNS = [
-    # OpenAI API keys
-    r"sk-[a-zA-Z0-9]{20,}",
+    # OpenAI API keys (including sk-proj-..., sk-..., etc.)
+    r"sk-[a-zA-Z0-9\-_]{20,}",
+    r"sk-proj-[a-zA-Z0-9\-_]{20,}",
     # Anthropic API keys
-    r"sk-ant-[a-zA-Z0-9\-]{20,}",
+    r"sk-ant-[a-zA-Z0-9\-_]{20,}",
     # AWS access key IDs
     r"AKIA[0-9A-Z]{16}",
     # AWS secret keys (40 chars, alphanumeric + special)
@@ -348,25 +349,11 @@ def redact_containers_inspect(inspect_data):
 
 
 def redact_container_inspect(container):
-    """Redact a single container's inspect data."""
+    """Redact a single container's inspect data - deep recursive redaction."""
     if not isinstance(container, dict):
         return container
     
-    result = {}
-    
-    for key, value in container.items():
-        if key == "Config":
-            result[key] = redact_container_config(value)
-        elif key == "Env" or (isinstance(value, list) and key.lower() == "env"):
-            result[key] = redact_env_list(value)
-        elif isinstance(value, dict):
-            result[key] = redact_dict(value, key)
-        elif isinstance(value, list):
-            result[key] = redact_list(value, key)
-        else:
-            result[key] = value
-    
-    return result
+    return redact_docker_dict_deep(container)
 
 
 def redact_container_config(config):
@@ -374,17 +361,70 @@ def redact_container_config(config):
     if not isinstance(config, dict):
         return config
     
+    return redact_docker_dict_deep(config)
+
+
+def redact_docker_dict_deep(d):
+    """
+    Deep recursive redaction for Docker inspect data.
+    Handles Env lists at any nesting level.
+    """
+    if not isinstance(d, dict):
+        return d
+    
     result = {}
     
-    for key, value in config.items():
-        if key == "Env":
-            result[key] = redact_env_list(value)
+    for key, value in d.items():
+        # Handle Env lists (environment variables)
+        if key == "Env" or key.lower() == "env":
+            if isinstance(value, list):
+                result[key] = redact_env_list(value)
+            else:
+                result[key] = value
+        # Handle nested dicts
         elif isinstance(value, dict):
-            result[key] = redact_dict(value, key)
+            result[key] = redact_docker_dict_deep(value)
+        # Handle lists (could contain dicts with Env)
         elif isinstance(value, list):
-            result[key] = redact_list(value, key)
+            result[key] = redact_docker_list_deep(value, key)
+        # Handle string values - check for sensitive patterns
+        elif isinstance(value, str):
+            result[key] = redact_sensitive_value(value, key)
         else:
             result[key] = value
+    
+    return result
+
+
+def redact_docker_list_deep(lst, parent_key=None):
+    """
+    Deep recursive redaction for lists in Docker data.
+    """
+    if not isinstance(lst, list):
+        return lst
+    
+    result = []
+    for item in lst:
+        if isinstance(item, dict):
+            result.append(redact_docker_dict_deep(item))
+        elif isinstance(item, list):
+            result.append(redact_docker_list_deep(item, parent_key))
+        elif isinstance(item, str):
+            # Handle environment variable format: KEY=VALUE
+            if "=" in item:
+                parts = item.split("=", 1)
+                if len(parts) == 2:
+                    env_key, env_value = parts
+                    if is_sensitive_key(env_key) or SENSITIVE_VALUE_REGEX.search(env_value):
+                        result.append(f"{env_key}={REDACTED_PLACEHOLDER}")
+                    else:
+                        result.append(item)
+                else:
+                    result.append(item)
+            else:
+                result.append(redact_sensitive_value(item, parent_key))
+        else:
+            result.append(item)
     
     return result
 
