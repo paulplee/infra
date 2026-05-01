@@ -1,0 +1,25 @@
+all:
+  children:
+    inference:
+      hosts:
+        pgx0:
+          ansible_host: pgx0.kp.cbnano.com
+          ansible_user: paulplee
+
+    dev:
+      hosts:
+        pegasus:
+          ansible_host: ae86.marina.cbnano.com
+          ansible_user: paulplee
+
+    server:
+      hosts:
+        ae86:
+          ansible_host: ae86.marina.cbnano.com
+          ansible_user: paulplee
+
+    proxy:
+      hosts:
+        zima:
+          ansible_host: zima.marina.cbnano.com
+          ansible_user: paulplee

@@ -1,0 +1,41 @@
+# infra/playbooks/deploy-llama.yml
+---
+- name: Deploy llama-server inference engine
+  hosts: pgx0
+  become: true # sudo
+
+  tasks:
+    - name: Ensure /etc/llama-server directory exists
+      file:
+        path: /etc/llama-server
+        state: directory
+        owner: root
+        mode: "0755"
+
+    - name: Deploy template service unit
+      copy:
+        src: ../hosts/pgx0/systemd/llama-server@.service
+        dest: /etc/systemd/system/llama-server@.service
+        owner: root
+        mode: "0644"
+      notify: Reload systemd
+
+    - name: Deploy model env files
+      copy:
+        src: "{{ item }}"
+        dest: /etc/llama-server/
+        owner: root
+        mode: "0640"
+      with_fileglob: ../hosts/pgx0/systemd/env/*.env
+      notify: Reload systemd
+
+    - name: Enable and start mistral instance
+      systemd:
+        name: llama-server@mistral
+        enabled: true
+        state: started
+
+  handlers:
+    - name: Reload systemd
+      systemd:
+        daemon_reload: true
