@@ -1,0 +1,34 @@
+# /etc/systemd/system/llama-server@.service
+
+[Unit]
+Description=llama.cpp server — %i
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=paulplee
+Group=paulplee
+WorkingDirectory=/home/paulplee
+
+EnvironmentFile=/etc/llama-server/%i.env
+
+ExecStart=/usr/local/bin/llama-server \
+    --model ${MODEL_PATH} \
+    --host ${HOST} \
+    --port ${PORT} \
+    --n-gpu-layers ${GPU_LAYERS} \
+    --ctx-size ${CTX_SIZE} \
+    --threads ${THREADS}
+
+Environment="CUDA_VISIBLE_DEVICES=0"
+Environment="PATH=/usr/local/cuda-13.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=llama-server-%i
+
+[Install]
+WantedBy=multi-user.target
