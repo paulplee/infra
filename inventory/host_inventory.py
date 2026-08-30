@@ -1410,6 +1410,7 @@ def main():
     ap.add_argument("--no-ports", action="store_true", help="Skip listening ports enumeration")
     ap.add_argument("--no-docker", action="store_true", help="Skip Docker enumeration")
     ap.add_argument("--no-redact", action="store_true", help="Disable redaction of sensitive information")
+    ap.add_argument("--stdout", action="store_true", help="Print JSON to stdout instead of writing a file (for remote fan-out: ssh host 'python3 - --stdout' < host_inventory.py)")
     args = ap.parse_args()
 
     psutil = try_import_psutil()
@@ -1450,6 +1451,10 @@ def main():
     if not args.no_redact:
         data = redact_inventory_data(data)
         data["_redaction_applied"] = True
+
+    if args.stdout:
+        print(json.dumps(data, indent=2))
+        return
 
     hostname = data["identity"]["hostname"] or "unknown-host"
     if args.out:

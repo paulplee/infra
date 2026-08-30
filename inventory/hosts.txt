@@ -1,0 +1,7 @@
+# cbnano fleet — ssh-targetable hosts for inventory fan-out (one per line)
+pgx0
+qnap
+pegasus
+ae86
+zima
+level10
