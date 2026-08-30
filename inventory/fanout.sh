@@ -62,4 +62,9 @@ if [ -n "$PUSH" ] && ls "$OUT"/inventory-*-"$DATE".json >/dev/null 2>&1; then
   ssh -o BatchMode=yes -o ConnectTimeout=8 "$PUSH" 'mkdir -p ~/netinv/data/inventory' \
     && scp -q "$OUT"/inventory-*-"$DATE".json "$PUSH":~/netinv/data/inventory/ \
     && echo "pushed to $PUSH:~/netinv/data/inventory/"
+  # retention: keep newest 8 inventories per host (zima disk tight; raw JSONs stay un-versioned)
+  for h in "${HOSTS[@]:-}" $( [ "$LOCAL" -eq 1 ] && echo "$(hostname -s | tr 'A-Z' 'a-z')" ); do
+    [ -n "$h" ] || continue
+    ssh -o BatchMode=yes "$PUSH" "cd ~/netinv/data/inventory 2>/dev/null && ls -1t inventory-$h-*.json 2>/dev/null | tail -n +9 | xargs -r rm -f"
+  done
 fi
